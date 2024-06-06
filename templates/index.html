@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body class="prevent-select">
+    <h1>Tic-Tac-Toe</h1>
+
+    <div id="message-box">
+        This is a very long message to inform you about something.
+    </div>
+
+    <table class="ttt prevent-select">
+    {{ range $rowIdx, $_ := N 1 .N }}
+        <tr class="tttRow prevent-select">
+        {{ range $colIdx, $_ := N 1 $.N }}
+            <td id="tttCell-{{ $rowIdx }}-{{ $colIdx }}" class="tttCell prevent-select">
+            </td>
+        {{ end }}
+        </tr>
+    {{ end }}
+    </table>
+
+    <script src="static/index.js"></script>
+</body>
+</html>

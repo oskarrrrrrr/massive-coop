@@ -1,0 +1,42 @@
+html, body {
+    height: 100%;
+}
+
+html {
+    display: table;
+    margin: auto;
+}
+
+body {
+    display: table-cell;
+}
+
+.prevent-select {
+  -webkit-user-select: none; /* Safari */
+  -ms-user-select: none; /* IE 10 and IE 11 */
+  user-select: none; /* Standard syntax */
+}
+
+.ttt {
+    font-family: sans-serif;
+    border-collapse: collapse;
+
+    width: 600px;
+    height: 600px;
+    table-layout: fixed;
+}
+
+.tttCell {
+    font-size: 3em;
+    border: solid;
+    height: 100px;
+    text-align: center;
+    cursor: default;
+}
+
+#message-box {
+    margin-top: 1em;
+    margin-bottom: 1em;
+    padding: 1em;
+    border: solid;
+}
