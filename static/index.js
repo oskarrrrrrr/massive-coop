@@ -5,6 +5,10 @@ const INITIAL_TIMEOUT = 1000
 let retryTimeoutMs = INITIAL_TIMEOUT
 let retries = 0
 
+let currentTeam = ""
+let token = ""
+let team = ""
+
 function wsUrl(relativePath) {
     const urlPrefix = (window.location.protocol === "https:") ? "wss://" : "ws://"
     return urlPrefix + window.location.host + relativePath
@@ -35,24 +39,50 @@ function connectSocket(url) {
         const msg = event.data
         console.log(`Got msg: ${msg}`)
         const lines = msg.split("\n")
-        if (lines[0] == "GameState") {
-            const cells = lines[1].slice(1,-1).split(" ")
-            for (let row = 0; row < 3; row++) {
-                for (let col = 0; col < 3; col++) {
-                    const i  = row * 3 + col
-                    let cell = getCell(row, col)
-                    if (cells[i] == "1") {
-                        cell.innerHTML = "O"
-                    } else if (cells[i] == "2") {
-                        cell.innerHTML = "X"
-                    } else {
-                        cell.innerHTML = ""
+        switch (lines[0]) {
+            case "GameState":
+                const cells = lines[1].slice(1,-1).split(" ")
+                for (let row = 0; row < 3; row++) {
+                    for (let col = 0; col < 3; col++) {
+                        const i  = row * 3 + col
+                        let cell = getCell(row, col)
+                        if (cells[i] == "1") {
+                            cell.innerHTML = "O"
+                        } else if (cells[i] == "2") {
+                            cell.innerHTML = "X"
+                        } else {
+                            cell.innerHTML = ""
+                        }
                     }
                 }
-            }
-        } else {
-            const arr = event.data.split(",")
-            getCell(arr[1], arr[2]).innerHTML = arr[0]
+                break
+            case "Board":
+                const values = lines[1].split(",")
+                for (let row = 0; row < 3; row++) {
+                    for (let col = 0; col < 3; col++) {
+                        i = row * 3 + col
+                        getCell(row, col).innerHTML = values[i]
+                    }
+                }
+                break
+            case "Round":
+                token = lines[1]
+                // TODO: parse date
+                currentTeam = lines[3]
+                break
+            case "Move":
+                let [row, col] = lines[1].split(",")
+                getCell(row, col).innerHTML = lines[2]
+                break
+            case "VoteCounts":
+                console.log(`VoteCounts: ${lines[2]}`)
+                break
+            case "Team":
+                team = lines[1]
+                break
+            default:
+                setMessageBox(msg)
+                break
         }
     }
 
@@ -71,22 +101,27 @@ function retry(url) {
 }
 
 function cellOnClick(row, col) {
-    const cell = getCell(row, col)
-    if (cell.innerHTML != "X" && cell.innerHTML != "O") {
-        cell.innerHTML = "O"
-        const msg = `${row},${col}`
-        console.log(`Sending message: ${msg}`)
-        socket.send(msg)
+    let cell = getCell(row, col)
+    if (currentTeam != team || cell.innerHTML != "") {
+        return
     }
+    const msg = `Vote\n${token}\n${row},${col}`
+    console.log(`Sending message: ${msg}`)
+    socket.send(msg)
 }
 
 function getCell(row, col) {
     return document.getElementById(`tttCell-${row}-${col}`)
 }
 
+function setMessageBox(msg) {
+    document.getElementById(`message-box`).textContent = msg
+}
+
 for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 3; col++) {
         const cell = getCell(row, col)
+        cell.innerHTML = ""
         cell.onclick = () => cellOnClick(row, col)
     }
 }
