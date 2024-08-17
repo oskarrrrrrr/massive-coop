@@ -23,6 +23,14 @@ var port = flag.String("port", "8080", "")
 var debug = flag.Bool("debug", false, "")
 var upgrader = websocket.Upgrader{}
 
+const GAME_REFRESH_RATE = 50 * time.Millisecond
+const GAME_START_TRANSITION_TIME = 1 * time.Second
+const ROUND_TRANSITION_TIME = 3 * time.Second
+const ROUND_DURATION = 5 * time.Second
+const GAME_OVER_TIME = 5 * time.Second
+const VOTE_BROADCAST_RATE = 200 * time.Millisecond
+const PLAYER_COUNT_BROADCAST_RATE = 200 * time.Millisecond
+
 func getIndexHandler() http.HandlerFunc {
 	N := func(start, end int) chan int {
 		stream := make(chan int)
@@ -76,7 +84,6 @@ func NewClient(conn *websocket.Conn, team Team) *Client {
 func (c *Client) HandleIncomingMessage(g *Game, msg string) {
 	lines := strings.Split(msg, "\n")
 	if len(lines) == 0 {
-		slog.Debug("Got an empty message.")
 		return
 	}
 	switch lines[0] {
@@ -84,17 +91,15 @@ func (c *Client) HandleIncomingMessage(g *Game, msg string) {
 		token := lines[1]
 		line := strings.Split(lines[2], ",")
 		row, rowErr := strconv.Atoi(line[0])
-		if rowErr != nil {
-			slog.Error("Failed to parse vote msg.", "error", rowErr)
-		}
 		col, colErr := strconv.Atoi(line[1])
-		if colErr != nil {
-			slog.Error("Failed to parse vote msg.", "error", colErr)
+		if rowErr != nil || colErr != nil {
+			return
 		}
 		g.CountVote <- Vote{
-			Token: token,
-			Team:  c.Team,
-			Move:  Move{Row: row, Col: col},
+			RoundToken:  token,
+			ClientToken: c.Token,
+			Team:        c.Team,
+			Move:        Move{Row: row, Col: col},
 		}
 	}
 }
@@ -102,6 +107,8 @@ func (c *Client) HandleIncomingMessage(g *Game, msg string) {
 func (c *Client) HandleClient(g *Game) {
 	g.ClientCounter.Inc()
 	defer g.ClientCounter.Dec()
+	defer func() { g.RemoveClient <- c }()
+	defer g.TeamCounter.LeaveTeam(c.Team)
 
 	incomingMessage := make(chan string)
 	done := make(chan struct{})
@@ -119,7 +126,6 @@ func (c *Client) HandleClient(g *Game) {
 				continue
 			}
 			msg := string(p)
-			slog.Debug("Got message.", "token", c.Token, "msg", msg)
 			incomingMessage <- msg
 		}
 	}()
@@ -243,15 +249,15 @@ func (board *Board) At(row, col int) Team {
 }
 
 func (board *Board) Set(row, col int, team Team) {
-    board[row*3+col] = team
+	board[row*3+col] = team
 }
 
 func (board *Board) Clear() {
-    for row := range 3 {
-        for col := range 3 {
-            board.Set(row, col, TeamEmpty)
-        }
-    }
+	for row := range 3 {
+		for col := range 3 {
+			board.Set(row, col, TeamEmpty)
+		}
+	}
 }
 
 type Move struct {
@@ -264,9 +270,10 @@ func (m Move) IsValid(board Board) bool {
 }
 
 type Vote struct {
-	Token string
-	Team  Team
-	Move  Move
+	RoundToken  string
+	ClientToken Token
+	Team        Team
+	Move        Move
 }
 
 type GameStateRound struct {
@@ -274,14 +281,16 @@ type GameStateRound struct {
 	Token      string
 	Team       Team
 	VotesCount map[Move]int
+	HasVoted   map[Token]struct{}
 }
 
-func NewGameStateRound(team Team) GameStateRound {
+func NewGameStateRound(team Team, time time.Time) GameStateRound {
 	return GameStateRound{
-		End:        time.Now().UTC().Add(5 * time.Second),
+		End:        time,
 		Token:      strconv.Itoa(rand.Int()),
 		Team:       team,
 		VotesCount: make(map[Move]int),
+		HasVoted:   make(map[Token]struct{}),
 	}
 }
 
@@ -301,7 +310,7 @@ func (g *Game) VoteCounter() {
 	voteBroadcaster := func() {
 		for {
 			select {
-			case <-time.After(200 * time.Millisecond):
+			case <-time.After(VOTE_BROADCAST_RATE):
 				tempGs := gs
 				if tempGs != nil {
 					sb := strings.Builder{}
@@ -312,13 +321,38 @@ func (g *Game) VoteCounter() {
 						for col := range 3 {
 							count := tempGs.VotesCount[Move{Row: row, Col: col}]
 							if row != 0 || col != 0 {
-								sb.WriteString(" ")
+								sb.WriteString(",")
 							}
-							sb.WriteString(strconv.Itoa(count))
+							if g.Board.At(row, col) == TeamEmpty {
+								sb.WriteString(strconv.Itoa(count))
+							}
 						}
 					}
-                    // TODO: uncomment to broadcast votes
-					// g.Broadcast <- []byte(sb.String())
+					preparedMsg, err := websocket.NewPreparedMessage(websocket.TextMessage, []byte(sb.String()))
+					if err != nil {
+						slog.Error("Failed to prepare message.")
+					}
+
+					sb = strings.Builder{}
+					sb.WriteString("VoteCounts\n")
+					sb.WriteString(tempGs.Token)
+					sb.WriteString("\n,,,,,,,,")
+					emptyPreparedMsg, err := websocket.NewPreparedMessage(websocket.TextMessage, []byte(sb.String()))
+					if err != nil {
+						slog.Error("Failed to prepare message.")
+					}
+
+					for _, client := range g.Clients.Values {
+						if client == nil {
+							continue
+						}
+						_, hasVoted := gs.HasVoted[client.Token]
+						if client.Team != gs.Team || hasVoted {
+							client.SendPreparedMsg <- preparedMsg
+						} else {
+                            client.SendPreparedMsg <- emptyPreparedMsg
+                        }
+					}
 				}
 			case <-stopBroadcaster:
 				return
@@ -336,8 +370,11 @@ func (g *Game) VoteCounter() {
 			}
 			gs = newGameState
 		case vote := <-g.CountVote:
-			if gs != nil && gs.Token == vote.Token && gs.Team == vote.Team && vote.Move.IsValid(g.Board) {
-				gs.VotesCount[vote.Move] += 1
+			if gs != nil && gs.Token == vote.RoundToken && gs.Team == vote.Team && vote.Move.IsValid(g.Board) {
+				if _, hasVoted := gs.HasVoted[vote.ClientToken]; !hasVoted {
+					gs.VotesCount[vote.Move] += 1
+					gs.HasVoted[vote.ClientToken] = struct{}{}
+				}
 			}
 		}
 	}
@@ -369,6 +406,7 @@ type Game struct {
 	Clients       *Clients
 	ClientCounter ClientCounter
 	AddClient     chan *Client
+	RemoveClient  chan *Client
 	Broadcast     chan []byte
 
 	GameState          any
@@ -382,6 +420,7 @@ func NewGame() *Game {
 	return &Game{
 		Clients:            NewClients(),
 		AddClient:          make(chan *Client),
+		RemoveClient:       make(chan *Client),
 		Broadcast:          make(chan []byte),
 		GameState:          GameStateNotStarted{},
 		CountVote:          make(chan Vote, 100),
@@ -429,14 +468,14 @@ func (g *Game) GameOver() (bool, Team) {
 		return true, g.Board.At(1, 1)
 	}
 
-    filled := 0
-    for row := range 3 {
-        for col := range 3 {
-            if g.Board.At(row, col) != TeamEmpty {
-                filled += 1
-            }
-        }
-    }
+	filled := 0
+	for row := range 3 {
+		for col := range 3 {
+			if g.Board.At(row, col) != TeamEmpty {
+				filled += 1
+			}
+		}
+	}
 
 	return filled == 9, TeamEmpty
 }
@@ -446,6 +485,8 @@ func (g *Game) ManageClients() {
 		select {
 		case client := <-g.AddClient:
 			g.Clients.Put(client)
+		case client := <-g.RemoveClient:
+			g.Clients.Remove(client)
 		case msg := <-g.Broadcast:
 			preparedMsg, err := websocket.NewPreparedMessage(websocket.TextMessage, msg)
 			if err != nil {
@@ -453,7 +494,6 @@ func (g *Game) ManageClients() {
 			} else {
 				for _, client := range g.Clients.Values {
 					if client != nil {
-						slog.Debug("Sending msg to client", "token", client.Token)
 						client.SendPreparedMsg <- preparedMsg
 					}
 				}
@@ -462,26 +502,36 @@ func (g *Game) ManageClients() {
 	}
 }
 
-func (g *Game) Run() {
-	const REFRESH_RATE = 50 * time.Millisecond
+func (g *Game) PlayerCountBroadcaster() {
 	for {
 		select {
-		case <-time.After(REFRESH_RATE):
+		case <-time.After(PLAYER_COUNT_BROADCAST_RATE):
+			s := fmt.Sprintf("PlayerCount\n%v\n%v", g.TeamCounter.TeamO, g.TeamCounter.TeamX)
+			g.Broadcast <- []byte(s)
+		}
+	}
+}
+
+func (g *Game) Run() {
+	for {
+		select {
+		case <-time.After(GAME_REFRESH_RATE):
 			g.run()
 		}
 	}
 }
 
 func (g *Game) run() {
-	const GAME_START_TRANSITION_TIME = 1 * time.Second
-
 	switch state := g.GameState.(type) {
 	case GameStateNotStarted:
 		if len(g.Clients.Values) > 0 {
+			now := time.Now().UTC()
 			transition := GameStateTransition{
-				TransitionEnd: time.Now().UTC().Add(GAME_START_TRANSITION_TIME),
+				TransitionEnd: now.Add(GAME_START_TRANSITION_TIME),
 				Message:       "Waiting to start a new game.",
-				TargetState:   NewGameStateRound(TeamO),
+				TargetState: NewGameStateRound(
+					TeamO, now.Add(GAME_START_TRANSITION_TIME+ROUND_DURATION),
+				),
 			}
 			g.GameState = transition
 			dateStr, err := transition.TransitionEnd.MarshalText()
@@ -499,13 +549,12 @@ func (g *Game) run() {
 			switch state := g.GameState.(type) {
 			case GameStateRound:
 				g.Broadcast <- []byte(state.Message())
-                g.CountVoteGameState <- &state
+				g.CountVoteGameState <- &state
 			}
 		}
 	case GameStateRound:
 		now := time.Now().UTC()
 		if now.After(state.End) {
-            slog.Info("Round END!")
 			var maxCount = 0
 			var maxMove = Move{Row: -1, Col: -1}
 			for row := range 3 {
@@ -519,60 +568,65 @@ func (g *Game) run() {
 				}
 			}
 
-            if maxCount == 0 {
-                r := rand.Int() % 9;
-                maxMove = Move{}
-                for r >= 0 {
-                    if maxMove.IsValid(g.Board) {
-                        r -= 1
-                    }
-                    if r >= 0 {
-                        if maxMove.Col < 2 {
-                            maxMove.Col += 1
-                        } else {
-                            maxMove.Row = (maxMove.Row + 1) % 3
-                            maxMove.Col = 0
-                        }
-                    }
-                }
-            }
+			if maxCount == 0 {
+				r := rand.Int() % 9
+				maxMove = Move{}
+				for r >= 0 {
+					if maxMove.IsValid(g.Board) {
+						r -= 1
+					}
+					if r >= 0 {
+						if maxMove.Col < 2 {
+							maxMove.Col += 1
+						} else {
+							maxMove.Row = (maxMove.Row + 1) % 3
+							maxMove.Col = 0
+						}
+					}
+				}
+			}
 
-            g.Board.Set(maxMove.Row, maxMove.Col, state.Team)
-            msg := fmt.Sprintf(
-                "Move\n%v,%v\n%v",
-                maxMove.Row, maxMove.Col, state.Team.String(),
-            )
-            g.Broadcast <- []byte(msg)
-            if gameOver, result := g.GameOver(); gameOver {
-                g.GameState = GameStateGameOver{
-                    End:    time.Now().UTC().Add(5 * time.Second),
-                    Result: result,
-                }
-                sb := strings.Builder{}
-                sb.WriteString("GameOver\n")
-                switch result {
-                case TeamEmpty:
-                    sb.WriteString("Draw")
-                case TeamO:
-                    sb.WriteString("O")
-                case TeamX:
-                    sb.WriteString("X")
-                }
-                g.Broadcast <- []byte(sb.String())
-            } else {
-                nextTeam := state.Team.OppositeTeam()
-                g.GameState = GameStateTransition{
-                    TransitionEnd: time.Now().UTC().Add(3 * time.Second),
-                    Message:       "Perpare for the next move.",
-                    TargetState:   NewGameStateRound(nextTeam),
-                }
-            }
+			g.Board.Set(maxMove.Row, maxMove.Col, state.Team)
+			msg := fmt.Sprintf(
+				"Move\n%v,%v\n%v",
+				maxMove.Row, maxMove.Col, state.Team.String(),
+			)
+			g.Broadcast <- []byte(msg)
+			if gameOver, result := g.GameOver(); gameOver {
+				g.GameState = GameStateGameOver{
+					End:    time.Now().UTC().Add(GAME_OVER_TIME),
+					Result: result,
+				}
+				sb := strings.Builder{}
+				sb.WriteString("GameOver\n")
+				switch result {
+				case TeamEmpty:
+					sb.WriteString("Draw")
+				case TeamO:
+					sb.WriteString("O")
+				case TeamX:
+					sb.WriteString("X")
+				}
+				g.Broadcast <- []byte(sb.String())
+			} else {
+				nextTeam := state.Team.OppositeTeam()
+				now := time.Now().UTC()
+				transitionEnd := now.Add(ROUND_TRANSITION_TIME)
+				g.GameState = GameStateTransition{
+					TransitionEnd: transitionEnd,
+					Message:       "Perpare for the next move.",
+					TargetState: NewGameStateRound(
+						nextTeam, now.Add(ROUND_TRANSITION_TIME+ROUND_DURATION),
+					),
+				}
+			}
 		}
 	case GameStateGameOver:
 		now := time.Now().UTC()
 		if now.After(state.End) {
 			g.GameState = GameStateNotStarted{}
-            g.Board.Clear()
+			g.Board.Clear()
+			g.Broadcast <- []byte(g.BoardMessage())
 		}
 	default:
 		slog.Error("Unexpected game state.", "GameState", g.GameState)
@@ -605,7 +659,6 @@ func makeWsConnection(game *Game, w http.ResponseWriter, r *http.Request) {
 		slog.Error("Failed to upgrade connection.", slog.Any("error", err))
 		return
 	}
-	slog.Debug("Client connected.", "token", client.Token)
 	game.AddClient <- client
 	go client.HandleClient(game)
 
@@ -622,63 +675,79 @@ func makeWsConnection(game *Game, w http.ResponseWriter, r *http.Request) {
 }
 
 func getGameStatus(w http.ResponseWriter, _ *http.Request, game *Game) {
-    sb := strings.Builder{}
+	sb := strings.Builder{}
 
-    indent := func () { sb.WriteString("    ") }
-    line := func(format string, a ...any) {
-        fmt.Fprintf(&sb, format, a...)
-        sb.WriteByte('\n')
-    }
-    dateFormat := "15:04:05 2006-01-02"
-    currentTime := func() {
-        indent(); line("Current Time: %v", time.Now().UTC().Format(dateFormat))
-    }
+	indent := func() { sb.WriteString("    ") }
+	line := func(format string, a ...any) {
+		fmt.Fprintf(&sb, format, a...)
+		sb.WriteByte('\n')
+	}
+	dateFormat := "15:04:05 2006-01-02"
+	currentTime := func() {
+		indent()
+		line("Current Time: %v", time.Now().UTC().Format(dateFormat))
+	}
 
-    printBoard := func() {
-        at := func(row, col int) string {
-            if game.Board.At(row, col) == TeamEmpty {
-                return " "
-            }
-            return game.Board.At(row, col).String()
-        }
+	printBoard := func() {
+		at := func(row, col int) string {
+			if game.Board.At(row, col) == TeamEmpty {
+				return " "
+			}
+			return game.Board.At(row, col).String()
+		}
 
-        indent(); fmt.Fprintf(&sb, "%v|%v|%v\n", at(0, 0), at(0, 1), at(0, 2))
-        indent(); line("-+-+-")
-        indent(); fmt.Fprintf(&sb, "%v|%v|%v\n", at(1, 0), at(1, 1), at(1, 2))
-        indent(); line("-+-+-")
-        indent(); fmt.Fprintf(&sb, "%v|%v|%v\n", at(2, 0), at(2, 1), at(2, 2))
-        line("");
-    }
+		indent()
+		fmt.Fprintf(&sb, "%v|%v|%v\n", at(0, 0), at(0, 1), at(0, 2))
+		indent()
+		line("-+-+-")
+		indent()
+		fmt.Fprintf(&sb, "%v|%v|%v\n", at(1, 0), at(1, 1), at(1, 2))
+		indent()
+		line("-+-+-")
+		indent()
+		fmt.Fprintf(&sb, "%v|%v|%v\n", at(2, 0), at(2, 1), at(2, 2))
+		line("")
+	}
 
-    switch gs := game.GameState.(type) {
-        case GameStateNotStarted:
-            line("Game State: not started")
-        case GameStateTransition:
-            line("Game State: in transition")
-            indent(); line("Target State: %v", reflect.TypeOf(gs.TargetState).Name())
-            timeLeft := gs.TransitionEnd.Sub(time.Now().UTC()).Round(time.Millisecond)
-            indent(); line("Time Left: %v", timeLeft)
-            indent(); line("Transition End: %v", gs.TransitionEnd.Format(dateFormat))
-            currentTime()
-        case GameStateRound:
-            printBoard()
-            line("Game State: round in progress")
-            indent(); line("Round End: %v", gs.End.Format(dateFormat))
-            currentTime()
-            indent(); line("Token: %v", gs.Token)
-            indent(); line("Team: %v", gs.Team.String())
-            indent(); line("Votes: %v", len(gs.VotesCount))
-        case GameStateGameOver:
-            printBoard()
-            line("Game State: game over")
-            indent(); line("Result: %v", gs.Result.String())
-        default:
-            line("GameState: %v\n", reflect.TypeOf(gs).Name())
-    }
-    line("Clients: %v", len(game.Clients.Values))
-    indent(); line("TeamO: %v", game.TeamCounter.TeamO)
-    indent(); line("TeamX: %v", game.TeamCounter.TeamX)
-    w.Write([]byte(sb.String()))
+	printBoard()
+
+	switch gs := game.GameState.(type) {
+	case GameStateNotStarted:
+		line("Game State: not started")
+	case GameStateTransition:
+		line("Game State: in transition")
+		indent()
+		line("Target State: %v", reflect.TypeOf(gs.TargetState).Name())
+		timeLeft := gs.TransitionEnd.Sub(time.Now().UTC()).Round(time.Millisecond)
+		indent()
+		line("Time Left: %v", timeLeft)
+		indent()
+		line("Transition End: %v", gs.TransitionEnd.Format(dateFormat))
+		currentTime()
+	case GameStateRound:
+		line("Game State: round in progress")
+		indent()
+		line("Round End: %v", gs.End.Format(dateFormat))
+		currentTime()
+		indent()
+		line("Token: %v", gs.Token)
+		indent()
+		line("Team: %v", gs.Team.String())
+		indent()
+		line("Votes: %v", len(gs.VotesCount))
+	case GameStateGameOver:
+		line("Game State: game over")
+		indent()
+		line("Result: %v", gs.Result.String())
+	default:
+		line("GameState: %v\n", reflect.TypeOf(gs).Name())
+	}
+	line("Clients: %v", len(game.Clients.Values))
+	indent()
+	line("TeamO: %v", game.TeamCounter.TeamO)
+	indent()
+	line("TeamX: %v", game.TeamCounter.TeamX)
+	w.Write([]byte(sb.String()))
 }
 
 func main() {
@@ -693,6 +762,7 @@ func main() {
 	go game.ManageClients()
 	go game.Run()
 	go game.VoteCounter()
+	go game.PlayerCountBroadcaster()
 
 	http.HandleFunc("GET /{$}", getIndexHandler())
 	http.Handle(
@@ -709,7 +779,9 @@ func main() {
 
 	http.HandleFunc(
 		"/api/getGameStatus",
-		func(w http.ResponseWriter, r *http.Request) { getGameStatus(w, r, game) },
+		func(w http.ResponseWriter, r *http.Request) {
+			getGameStatus(w, r, game)
+		},
 	)
 
 	err := http.ListenAndServe(":"+*port, nil)

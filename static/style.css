@@ -27,11 +27,32 @@ body {
 }
 
 .tttCell {
-    font-size: 3em;
-    border: solid;
+    width: 80%;
+    height: 80%;
+
+    margin: auto;
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.tttCellWrapper {
     height: 100px;
-    text-align: center;
+    border: solid;
+    border-color: black;
     cursor: default;
+    font-size: 3.5em;
+}
+
+.tttCellSelected {
+    background: #E1E1E1;
+}
+
+.voteCounter {
+    font-size: 0.4em;
+    color: #6a6a6a;
+    text-align: center;
 }
 
 #message-box {
@@ -39,4 +60,9 @@ body {
     margin-bottom: 1em;
     padding: 1em;
     border: solid;
+}
+
+#status {
+    display: flex;
+    justify-content: space-between;
 }

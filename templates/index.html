@@ -6,15 +6,20 @@
 <body class="prevent-select">
     <h1>Tic-Tac-Toe</h1>
 
-    <div id="message-box">
-        This is a very long message to inform you about something.
+    <div id="status">
+        <span>team: <span id="your-team"></span></span>
+        <span>[players online] O: <span id="o-players-count"></span> X: <span id="x-players-count"></span> </span>
+        <span>time left: <span id="time-left"></span></span>
     </div>
+    <div id="message-box"> </div>
 
     <table class="ttt prevent-select">
     {{ range $rowIdx, $_ := N 1 .N }}
         <tr class="tttRow prevent-select">
         {{ range $colIdx, $_ := N 1 $.N }}
-            <td id="tttCell-{{ $rowIdx }}-{{ $colIdx }}" class="tttCell prevent-select">
+            <td id="tttCellWrapper-{{ $rowIdx }}-{{ $colIdx }}" class="tttCellWrapper">
+                <div id="tttCell-{{ $rowIdx }}-{{ $colIdx }}" class="tttCell prevent-select"></div>
+                <div id="voteCounter-{{ $rowIdx }}-{{ $colIdx }}" class="voteCounter"></div>
             </td>
         {{ end }}
         </tr>
