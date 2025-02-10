@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 export DEBUG="true"
 gin \
     -appPort "8080" \

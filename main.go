@@ -340,19 +340,18 @@ func (g *Game) VoteCounter() {
 					emptyPreparedMsg, err := websocket.NewPreparedMessage(websocket.TextMessage, []byte(sb.String()))
 					if err != nil {
 						slog.Error("Failed to prepare message.")
-					}
-
-					for _, client := range g.Clients.Values {
-						if client == nil {
-							continue
-						}
-						_, hasVoted := gs.HasVoted[client.Token]
-						if client.Team != gs.Team || hasVoted {
-							client.SendPreparedMsg <- preparedMsg
-						} else {
-                            client.SendPreparedMsg <- emptyPreparedMsg
+					} else {
+                        roundFinished := time.Now().UTC().After(tempGs.End)
+                        for _, client := range g.Clients.Values {
+                            if client == nil { continue }
+                            _, hasVoted := tempGs.HasVoted[client.Token]
+                            if roundFinished || client.Team != tempGs.Team || hasVoted {
+                                client.SendPreparedMsg <- preparedMsg
+                            } else {
+                                client.SendPreparedMsg <- emptyPreparedMsg
+                            }
                         }
-					}
+                    }
 				}
 			case <-stopBroadcaster:
 				return

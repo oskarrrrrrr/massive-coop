@@ -1,7 +1,14 @@
 # Massive Co-Op Tic-Tac-Toe
 
-A simple implementation of a multiplayer Tic-Tac-Toe. Players are randomly assigned to a team (O or X) and during their turn they vote for a move. The move with the most votes is automatically made at the end of the round. If no votes are casted then a random move is made. After casting a vote or when it's opponents' turn players can see vote counts for each move in real time.
+In this game, each player is automatically assigned to either team O or
+team X. During their turn, players can vote for any legal move, and once
+the voting period ends, the move with the most votes is played. If there
+are no players or no votes, a random move will be made. Grey numbers indicate
+the vote counts, which are either shown after a move is made or continuously
+during the opponent's turn.
 
 To test the game for multiple players you can open the game in multiple tabs.
 
-[Play Here](https://sociablevase.xyz)
+## Running
+
+Run `go mod tidy` and `go run main.go` then go to `localhost:8080`.
